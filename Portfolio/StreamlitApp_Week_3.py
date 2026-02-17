@@ -4,14 +4,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
-import posixpath
 import tempfile
 import joblib
 import boto3
-import sagemaker
-from sagemaker.predictor import Predictor
-from sagemaker.serializers import NumpySerializer
-from sagemaker.deserializers import NumpyDeserializer
 import shap
 
 warnings.simplefilter("ignore")
@@ -37,10 +32,9 @@ def get_session():
     )
 
 session = get_session()
-sm_session = sagemaker.Session(boto_session=session)
 
 # ===============================
-# MODEL CONFIG
+# MODEL FEATURES
 # ===============================
 
 FEATURE_KEYS = [
@@ -51,7 +45,6 @@ FEATURE_KEYS = [
 ]
 
 MODEL_INFO = {
-    "endpoint": ENDPOINT_NAME,
     "explainer": "explainer.shap",
     "keys": FEATURE_KEYS,
     "inputs": [
@@ -61,28 +54,34 @@ MODEL_INFO = {
 }
 
 # ===============================
-# PREDICTION FUNCTION
+# CALL ENDPOINT (BOTO3 VERSION)
 # ===============================
 
 def call_model_api(input_df):
-    predictor = Predictor(
-        endpoint_name=MODEL_INFO["endpoint"],
-        sagemaker_session=sm_session,
-        serializer=NumpySerializer(),
-        deserializer=NumpyDeserializer()
-    )
+
+    runtime = session.client("sagemaker-runtime")
 
     try:
-        raw_pred = predictor.predict(input_df.values)
-        pred_val = float(raw_pred[0])
-        return round(pred_val, 6), 200
+        response = runtime.invoke_endpoint(
+            EndpointName=ENDPOINT_NAME,
+            ContentType="application/json",
+            Body=input_df.to_json(orient="values")
+        )
+
+        result = response["Body"].read().decode()
+        prediction = float(result.strip("[]"))
+
+        return round(prediction, 6), 200
+
     except Exception as e:
         return f"Error: {str(e)}", 500
 
+
 # ===============================
-# SHAP LOADER
+# LOAD SHAP EXPLAINER
 # ===============================
 
+@st.cache_resource
 def load_shap_explainer():
     s3 = session.client("s3")
     local_path = os.path.join(tempfile.gettempdir(), MODEL_INFO["explainer"])
@@ -96,6 +95,7 @@ def load_shap_explainer():
 
     return joblib.load(local_path)
 
+
 def display_explanation(input_df):
     explainer = load_shap_explainer()
     shap_values = explainer(input_df.values)
@@ -105,6 +105,7 @@ def display_explanation(input_df):
     fig, ax = plt.subplots(figsize=(8, 4))
     shap.plots.waterfall(shap_values[0], show=False)
     st.pyplot(fig)
+
 
 # ===============================
 # STREAMLIT UI
@@ -130,6 +131,7 @@ with st.form("prediction_form"):
     submitted = st.form_submit_button("Predict")
 
 if submitted:
+
     input_df = pd.DataFrame([user_inputs])
 
     prediction, status = call_model_api(input_df)
