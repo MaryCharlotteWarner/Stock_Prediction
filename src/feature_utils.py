@@ -7,35 +7,35 @@ import requests
 import os
 import sys
 
+# Set this to the final pair chosen in your notebook
+PAIR_TICKERS = ['NVDA', 'AMD']
+
 
 def extract_features():
 
     return_period = 5
-    
+
     START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
     END_DATE = datetime.date.today().strftime("%Y-%m-%d")
-    
-    # changed tickers to avoid MSFT and better match your stock/pair-trading setup
+
     stk_tickers = ['NVDA', 'AMD', 'GOOGL']
     ccy_tickers = ['DEXJPUS', 'DEXUSUK']
     idx_tickers = ['SP500', 'DJIA', 'VIXCLS']
-    
+
     stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
     ccy_data = web.DataReader(ccy_tickers, 'fred', start=START_DATE, end=END_DATE)
     idx_data = web.DataReader(idx_tickers, 'fred', start=START_DATE, end=END_DATE)
 
-    # changed target stock from MSFT to NVDA
     Y = np.log(stk_data.loc[:, ('Adj Close', 'NVDA')]).diff(return_period).shift(-return_period)
     Y.name = Y.name[-1] + '_Future'
-    
-    # changed feature stocks from GOOGL/IBM to GOOGL/AMD
+
     X1 = np.log(stk_data.loc[:, ('Adj Close', ('GOOGL', 'AMD'))]).diff(return_period)
     X1.columns = X1.columns.droplevel()
     X2 = np.log(ccy_data).diff(return_period)
     X3 = np.log(idx_data).diff(return_period)
 
     X = pd.concat([X1, X2, X3], axis=1)
-    
+
     dataset = pd.concat([Y, X], axis=1).dropna().iloc[::return_period, :]
     Y = dataset.loc[:, Y.name]
     X = dataset.loc[:, X.columns]
@@ -50,17 +50,16 @@ def extract_features_pair():
 
     START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
     END_DATE = datetime.date.today().strftime("%Y-%m-%d")
-    
-    # changed pair from AAPL/MPWR to a more pair-trading-friendly example
-    stk_tickers = ['NVDA', 'AMD']
-    
+
+    stk_tickers = PAIR_TICKERS
+
     stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
 
-    Y = stk_data.loc[:, ('Adj Close', 'NVDA')]
-    Y.name = 'NVDA'
+    Y = stk_data.loc[:, ('Adj Close', stk_tickers[0])]
+    Y.name = stk_tickers[0]
 
-    X = stk_data.loc[:, ('Adj Close', 'AMD')]
-    X.name = 'AMD'
+    X = stk_data.loc[:, ('Adj Close', stk_tickers[1])]
+    X.name = stk_tickers[1]
 
     dataset = pd.concat([Y, X], axis=1).dropna()
     Y = dataset.loc[:, Y.name]
@@ -72,9 +71,9 @@ def extract_features_pair():
 
 
 def get_bitcoin_historical_prices(days=60):
-    
+
     BASE_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    
+
     params = {
         'vs_currency': 'usd',
         'days': days,
