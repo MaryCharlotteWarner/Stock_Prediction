@@ -54,13 +54,14 @@ sm_session = sagemaker.Session(boto_session=session)
 
 # Data & Model Configuration
 df_features = extract_features_pair()
+pair_keys = list(df_features.columns)
 
 MODEL_INFO = {
         "endpoint": aws_endpoint,
         "explainer": 'explainer_pair.shap',
         "pipeline": 'finalized_pair_model.tar.gz',
-        "keys": ["AMD", "NVDA"],
-        "inputs": [{"name": k, "type": "number", "min": 0.0, "max": 1.0, "default": 0.0, "step": 10.0} for k in ["AMD", "NVDA"]]
+        "keys": pair_keys,
+        "inputs": [{"name": k, "type": "number", "min": 0.0, "max": 10000.0, "default": 0.0, "step": 1.0} for k in pair_keys]
 }
 
 def load_pipeline(_session, bucket, key):
@@ -136,8 +137,8 @@ def display_explanation(input_df, session, aws_bucket):
     st.info(f"**Business Insight:** The most influential factor in this decision was **{top_feature}**.")
 
 # Streamlit UI
-st.set_page_config(page_title="ML Deployment", layout="wide")
-st.title("👨‍💻 ML Deployment")
+st.set_page_config(page_title="Pair Trading ML Deployment", layout="wide")
+st.title("👨‍💻 Pair Trading ML Deployment")
 
 with st.form("pred_form"):
     st.subheader("Inputs")
