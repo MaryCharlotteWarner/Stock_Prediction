@@ -35,20 +35,27 @@ session = get_session()
 # ===============================
 # MODEL FEATURES
 # ===============================
-# REPLACE THESE WITH THE ACTUAL FEATURES
-# YOUR REGRESSION MODEL WAS TRAINED ON
+# Changed from placeholders to relevant regression feature names
 FEATURE_KEYS = [
-    "Feature_1",
-    "Feature_2",
-    "Feature_3",
-    "Feature_4"
+    "IBM_CR_Cum",
+    "NVDA_CR_Cum",
+    "GOOGL_CR_Cum",
+    "AMD_CR_Cum"
 ]
+
+# Added user-friendly labels
+FEATURE_LABELS = {
+    "IBM_CR_Cum": "IBM cumulative return",
+    "NVDA_CR_Cum": "NVIDIA cumulative return",
+    "GOOGL_CR_Cum": "Alphabet cumulative return",
+    "AMD_CR_Cum": "AMD cumulative return"
+}
 
 MODEL_INFO = {
     "explainer": "explainer.shap",
     "keys": FEATURE_KEYS,
     "inputs": [
-        {"name": k, "min": -10.0, "max": 10.0, "default": 0.0, "step": 0.01}
+        {"name": k, "label": FEATURE_LABELS[k], "min": -10.0, "max": 10.0, "default": 0.0, "step": 0.01}
         for k in FEATURE_KEYS
     ]
 }
@@ -96,12 +103,13 @@ def load_shap_explainer():
 def display_explanation(input_df):
     try:
         explainer = load_shap_explainer()
-        shap_values = explainer(input_df.values)
+        shap_values = explainer(input_df)
 
         st.subheader("SHAP Explanation")
-        fig, ax = plt.subplots(figsize=(8, 4))
+        fig = plt.figure(figsize=(8, 4))
         shap.plots.waterfall(shap_values[0], show=False)
         st.pyplot(fig)
+        plt.close(fig)
     except Exception as e:
         st.warning(f"SHAP explanation could not load: {e}")
 
@@ -111,6 +119,7 @@ def display_explanation(input_df):
 
 st.set_page_config(page_title="Regression Predictor", layout="wide")
 st.title("Regression Prediction App")
+st.write("Enter the four market feature values below and click Run Prediction.")
 
 with st.form("prediction_form"):
     cols = st.columns(2)
@@ -119,14 +128,14 @@ with st.form("prediction_form"):
     for i, inp in enumerate(MODEL_INFO["inputs"]):
         with cols[i % 2]:
             user_inputs[inp["name"]] = st.number_input(
-                inp["name"],
-                min_value=inp["min"],
-                max_value=inp["max"],
-                value=inp["default"],
-                step=inp["step"]
+                inp["label"],
+                min_value=float(inp["min"]),
+                max_value=float(inp["max"]),
+                value=float(inp["default"]),
+                step=float(inp["step"])
             )
 
-    submitted = st.form_submit_button("Predict")
+    submitted = st.form_submit_button("Run Prediction")
 
 if submitted:
     input_df = pd.DataFrame([user_inputs])
