@@ -1,88 +1,70 @@
+import os
+import json
 import numpy as np
 import pandas as pd
-import datetime
-import yfinance as yf
-import pandas_datareader.data as web
-import requests
-import os
-import sys
-
-# Set this to the final pair chosen in your notebook
-PAIR_TICKERS = ['NVDA', 'AMD']
 
 
-def extract_features():
+def convert_input_pca_regression(request_body, request_content_type):
+    """
+    Convert user-entered feature values into a single-row dataframe
+    that matches the regression training feature structure.
 
+    Steps:
+    1. Load SP500 dataset
+    2. Recreate transformed feature matrix used for training
+    3. Find the closest historical row
+    4. Replace the 4 selected feature values with user inputs
+    5. Return the final dataframe for prediction / SHAP
+    """
+
+    if request_content_type != "application/json":
+        raise ValueError("This app only supports application/json input.")
+
+    user_vals = json.loads(request_body)
+
+    possible_paths = [
+        "SP500Data.csv",
+        "/mnt/data/SP500Data (5).csv",
+        os.path.join(os.getcwd(), "SP500Data.csv"),
+    ]
+
+    data_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            data_path = path
+            break
+
+    if data_path is None:
+        raise FileNotFoundError("Could not find SP500Data.csv.")
+
+    dataset = pd.read_csv(data_path, index_col=0)
+
+    # Keep this aligned with your notebook
+    target = "MSFT"
     return_period = 5
 
-    START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
-    END_DATE = datetime.date.today().strftime("%Y-%m-%d")
+    selected_features = ["IBM_CR_Cum", "NVDA_CR_Cum", "GOOGL_CR_Cum", "AMD_CR_Cum"]
 
-    stk_tickers = ['NVDA', 'AMD', 'GOOGL']
-    ccy_tickers = ['DEXJPUS', 'DEXUSUK']
-    idx_tickers = ['SP500', 'DJIA', 'VIXCLS']
+    # Recreate transformed X structure
+    X = np.log(dataset.drop([target], axis=1)).diff(return_period)
+    X = np.exp(X).cumsum()
+    X.columns = [f"{col}_CR_Cum" for col in X.columns]
+    X = X.dropna().copy()
 
-    stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
-    ccy_data = web.DataReader(ccy_tickers, 'fred', start=START_DATE, end=END_DATE)
-    idx_data = web.DataReader(idx_tickers, 'fred', start=START_DATE, end=END_DATE)
+    missing_features = [f for f in selected_features if f not in X.columns]
+    if missing_features:
+        raise ValueError(f"Missing selected features in transformed dataset: {missing_features}")
 
-    Y = np.log(stk_data.loc[:, ('Adj Close', 'NVDA')]).diff(return_period).shift(-return_period)
-    Y.name = Y.name[-1] + '_Future'
+    # Find closest row to keep other unseen features realistic
+    distances = np.sqrt(
+        sum((X[feature] - float(user_vals[feature])) ** 2 for feature in selected_features)
+    )
 
-    X1 = np.log(stk_data.loc[:, ('Adj Close', ('GOOGL', 'AMD'))]).diff(return_period)
-    X1.columns = X1.columns.droplevel()
-    X2 = np.log(ccy_data).diff(return_period)
-    X3 = np.log(idx_data).diff(return_period)
+    closest_index = distances.idxmin()
+    closest_row = X.loc[[closest_index]].copy()
 
-    X = pd.concat([X1, X2, X3], axis=1)
+    # Override selected features with user values
+    for feature in selected_features:
+        closest_row.loc[:, feature] = float(user_vals[feature])
 
-    dataset = pd.concat([Y, X], axis=1).dropna().iloc[::return_period, :]
-    Y = dataset.loc[:, Y.name]
-    X = dataset.loc[:, X.columns]
-    dataset.index.name = 'Date'
-    features = dataset.sort_index()
-    features = features.reset_index(drop=True)
-    features = features.iloc[:, 1:]
-    return features
-
-
-def extract_features_pair():
-
-    START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
-    END_DATE = datetime.date.today().strftime("%Y-%m-%d")
-
-    stk_tickers = PAIR_TICKERS
-
-    stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
-
-    Y = stk_data.loc[:, ('Adj Close', stk_tickers[0])]
-    Y.name = stk_tickers[0]
-
-    X = stk_data.loc[:, ('Adj Close', stk_tickers[1])]
-    X.name = stk_tickers[1]
-
-    dataset = pd.concat([Y, X], axis=1).dropna()
-    Y = dataset.loc[:, Y.name]
-    X = dataset.loc[:, X.name]
-    dataset.index.name = 'Date'
-    features = dataset.sort_index()
-    features = features.reset_index(drop=True)
-    return features
-
-
-def get_bitcoin_historical_prices(days=60):
-
-    BASE_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-
-    params = {
-        'vs_currency': 'usd',
-        'days': days,
-        'interval': 'daily'
-    }
-    response = requests.get(BASE_URL, params=params)
-    data = response.json()
-    prices = data['prices']
-    df = pd.DataFrame(prices, columns=['Timestamp', 'Close Price (USD)'])
-    df['Date'] = pd.to_datetime(df['Timestamp'], unit='ms').dt.normalize()
-    df = df[['Date', 'Close Price (USD)']].set_index('Date')
-    return df
+    return closest_row
