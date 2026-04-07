@@ -1,172 +1,250 @@
-import os, sys, warnings
+import os
+import json
+import tarfile
+import tempfile
+import warnings
+
+import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
-import posixpath
-
-import joblib
-import tarfile
-import tempfile
-
 import boto3
 import sagemaker
 from sagemaker.predictor import Predictor
-from sagemaker.serializers import CSVSerializer
-from sagemaker.deserializers import JSONDeserializer
-from sagemaker.serializers import NumpySerializer
+from sagemaker.serializers import JSONSerializer
 from sagemaker.deserializers import NumpyDeserializer
-
 from sklearn.pipeline import Pipeline
 import shap
 
+from feature_utils import convert_input_pca_regression
 
-# Setup & Path Configuration
 warnings.simplefilter("ignore")
 
-# Fix path for Streamlit Cloud (ensure 'src' is findable)
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(current_dir, '..'))
-if project_root not in sys.path:
-    sys.path.append(project_root)
+# ---------------------------
+# PAGE SETUP
+# ---------------------------
+st.set_page_config(page_title="Stock Return Regression App", layout="wide")
+st.title("📈 Stock Return Regression App")
+st.caption(
+    "Enter four market feature values, click Run Prediction, and the app will predict the target stock's future return."
+)
 
-from src.feature_utils import extract_features_pair
-
-# Access the secrets
+# ---------------------------
+# AWS SECRETS
+# ---------------------------
 aws_id = st.secrets["aws_credentials"]["AWS_ACCESS_KEY_ID"]
 aws_secret = st.secrets["aws_credentials"]["AWS_SECRET_ACCESS_KEY"]
 aws_token = st.secrets["aws_credentials"]["AWS_SESSION_TOKEN"]
 aws_bucket = st.secrets["aws_credentials"]["AWS_BUCKET"]
 aws_endpoint = st.secrets["aws_credentials"]["AWS_ENDPOINT"]
 
-# AWS Session Management
+# ---------------------------
+# AWS SESSION
+# ---------------------------
 @st.cache_resource
-def get_session(aws_id, aws_secret, aws_token):
+def get_boto_session():
     return boto3.Session(
         aws_access_key_id=aws_id,
         aws_secret_access_key=aws_secret,
         aws_session_token=aws_token,
-        region_name='us-east-1'
+        region_name="us-east-1",
     )
 
-session = get_session(aws_id, aws_secret, aws_token)
-sm_session = sagemaker.Session(boto_session=session)
+boto_session = get_boto_session()
+sm_session = sagemaker.Session(boto_session=boto_session)
 
-# Data & Model Configuration
-df_features = extract_features_pair()
-pair_keys = list(df_features.columns)
+# ---------------------------
+# FEATURE CONFIG
+# These should match the 4 inputs your project is using
+# ---------------------------
+FEATURE_CONFIG = [
+    {
+        "name": "IBM_CR_Cum",
+        "label": "IBM cumulative return",
+        "help": "Recent cumulative return signal for IBM.",
+        "min": -5.0,
+        "max": 5.0,
+        "default": 0.0,
+        "step": 0.05,
+    },
+    {
+        "name": "NVDA_CR_Cum",
+        "label": "NVIDIA cumulative return",
+        "help": "Recent cumulative return signal for NVIDIA.",
+        "min": -5.0,
+        "max": 5.0,
+        "default": 0.0,
+        "step": 0.05,
+    },
+    {
+        "name": "GOOGL_CR_Cum",
+        "label": "Alphabet cumulative return",
+        "help": "Recent cumulative return signal for Alphabet / Google.",
+        "min": -5.0,
+        "max": 5.0,
+        "default": 0.0,
+        "step": 0.05,
+    },
+    {
+        "name": "AMD_CR_Cum",
+        "label": "AMD cumulative return",
+        "help": "Recent cumulative return signal for AMD.",
+        "min": -5.0,
+        "max": 5.0,
+        "default": 0.0,
+        "step": 0.05,
+    },
+]
 
 MODEL_INFO = {
-        "endpoint": aws_endpoint,
-        "explainer": 'explainer_pair.shap',
-        "pipeline": 'finalized_pair_model.tar.gz',
-        "keys": pair_keys,
-        "inputs": [{"name": k, "type": "number", "min": 0.0, "max": 10000.0, "default": 0.0, "step": 1.0} for k in pair_keys]
+    "endpoint": aws_endpoint,
+    "explainer_filename": "explainer_pca.shap",
+    "pipeline_filename": "finalized_pca_model.tar.gz",
+    "pipeline_s3_prefix": "sklearn-pipeline-deployment",
+    "explainer_s3_prefix": "explainer",
 }
 
-def load_pipeline(_session, bucket, key):
-    s3_client = _session.client('s3')
-    filename = MODEL_INFO["pipeline"]
+# ---------------------------
+# LOADERS
+# ---------------------------
+@st.cache_resource
+def load_pipeline_from_s3():
+    s3_client = boto_session.client("s3")
 
-    s3_client.download_file(
-        Filename=filename,
-        Bucket=bucket,
-        Key=f"{key}/{os.path.basename(filename)}"
-    )
+    local_tar_path = os.path.join(tempfile.gettempdir(), MODEL_INFO["pipeline_filename"])
 
-    # Extract the .joblib file from the .tar.gz
-    with tarfile.open(filename, "r:gz") as tar:
-        tar.extractall(path=".")
-        joblib_file = [f for f in tar.getnames() if f.endswith('.joblib')][0]
+    if not os.path.exists(local_tar_path):
+        s3_client.download_file(
+            Bucket=aws_bucket,
+            Key=f"{MODEL_INFO['pipeline_s3_prefix']}/{MODEL_INFO['pipeline_filename']}",
+            Filename=local_tar_path,
+        )
 
-    # Load the full pipeline
-    return joblib.load(joblib_file)
+    extract_dir = os.path.join(tempfile.gettempdir(), "hw5_pipeline_extract")
+    os.makedirs(extract_dir, exist_ok=True)
 
-def load_shap_explainer(_session, bucket, key, local_path):
-    s3_client = _session.client('s3')
+    with tarfile.open(local_tar_path, "r:gz") as tar:
+        tar.extractall(path=extract_dir)
+        joblib_files = [name for name in tar.getnames() if name.endswith(".joblib")]
 
-    # Only download if it doesn't exist locally to save time
-    if not os.path.exists(local_path):
-        s3_client.download_file(Filename=local_path, Bucket=bucket, Key=key)
+    if not joblib_files:
+        raise FileNotFoundError("No .joblib model file found inside the tar.gz file.")
 
-    with open(local_path, "rb") as f:
+    model_path = os.path.join(extract_dir, joblib_files[0])
+    return joblib.load(model_path)
+
+
+@st.cache_resource
+def load_explainer_from_s3():
+    s3_client = boto_session.client("s3")
+
+    local_explainer_path = os.path.join(tempfile.gettempdir(), MODEL_INFO["explainer_filename"])
+
+    if not os.path.exists(local_explainer_path):
+        s3_client.download_file(
+            Bucket=aws_bucket,
+            Key=f"{MODEL_INFO['explainer_s3_prefix']}/{MODEL_INFO['explainer_filename']}",
+            Filename=local_explainer_path,
+        )
+
+    with open(local_explainer_path, "rb") as f:
         return shap.Explainer.load(f)
 
-# Prediction Logic
-def call_model_api(input_df):
-
+# ---------------------------
+# ENDPOINT CALL
+# ---------------------------
+def call_model_api(user_inputs: dict):
     predictor = Predictor(
         endpoint_name=MODEL_INFO["endpoint"],
         sagemaker_session=sm_session,
-        serializer=NumpySerializer(),
-        deserializer=NumpyDeserializer()
+        serializer=JSONSerializer(),
+        deserializer=NumpyDeserializer(),
     )
 
     try:
-        raw_pred = predictor.predict(input_df)
-        pred_val = pd.DataFrame(raw_pred).values[-1][0]
-        return round(float(pred_val), 4), 200
+        prediction = predictor.predict(user_inputs)
+        pred_value = np.array(prediction).reshape(-1)[0]
+        return float(pred_value), 200
     except Exception as e:
-        return f"Error: {str(e)}", 500
+        return f"Prediction error: {str(e)}", 500
 
-# Local Explainability
-def display_explanation(input_df, session, aws_bucket):
-    explainer_name = MODEL_INFO["explainer"]
-    explainer = load_shap_explainer(
-        session,
-        aws_bucket,
-        posixpath.join('explainer', explainer_name),
-        os.path.join(tempfile.gettempdir(), explainer_name)
-    )
+# ---------------------------
+# SHAP DISPLAY
+# ---------------------------
+def display_explanation(user_inputs: dict):
+    try:
+        explainer = load_explainer_from_s3()
+        best_pipeline = load_pipeline_from_s3()
 
-    best_pipeline = load_pipeline(session, aws_bucket, 'sklearn-pipeline-deployment')
-    preprocessing_pipeline = Pipeline(steps=best_pipeline.steps[:-2])
-    input_df_transformed = preprocessing_pipeline.transform(input_df)
-    feature_names = best_pipeline[1:4].get_feature_names_out()
-    input_df_transformed = pd.DataFrame(input_df_transformed, columns=feature_names)
-    shap_values = explainer(input_df_transformed)
+        model_ready_df = convert_input_pca_regression(
+            json.dumps(user_inputs),
+            "application/json",
+        )
 
-    st.subheader("🔍 Decision Transparency (SHAP)")
-    fig, ax = plt.subplots(figsize=(10, 4))
-    shap.plots.waterfall(shap_values[0, :, 0], show=False)
-    st.pyplot(fig)
+        preprocessing_pipeline = Pipeline(steps=best_pipeline.steps[:-1])
+        transformed = preprocessing_pipeline.transform(model_ready_df)
 
-    # top feature
-    top_feature_idx = np.abs(shap_values[0, :, 0].values).argmax()
-    top_feature = shap_values[0, :, 0].feature_names[top_feature_idx]
-    st.info(f"**Business Insight:** The most influential factor in this decision was **{top_feature}**.")
+        try:
+            transformed_feature_names = preprocessing_pipeline.get_feature_names_out()
+        except:
+            transformed_feature_names = [f"Feature_{i}" for i in range(transformed.shape[1])]
 
-# Streamlit UI
-st.set_page_config(page_title="Pair Trading ML Deployment", layout="wide")
-st.title("👨‍💻 Pair Trading ML Deployment")
+        transformed_df = pd.DataFrame(transformed, columns=transformed_feature_names)
+        shap_values = explainer(transformed_df)
 
-with st.form("pred_form"):
-    st.subheader("Inputs")
+        st.subheader("🔍 SHAP Explanation")
+
+        fig = plt.figure(figsize=(10, 4))
+        shap.plots.waterfall(shap_values[0], max_display=10, show=False)
+        st.pyplot(fig)
+        plt.close(fig)
+
+        impact_series = pd.Series(
+            np.abs(shap_values[0].values),
+            index=shap_values[0].feature_names
+        ).sort_values(ascending=False)
+
+        st.write("### Top feature impacts")
+        st.dataframe(impact_series.head(10).reset_index().rename(
+            columns={"index": "Feature", 0: "Absolute SHAP Impact"}
+        ))
+
+    except Exception as e:
+        st.warning(f"Could not generate SHAP explanation: {str(e)}")
+
+# ---------------------------
+# USER INPUT UI
+# ---------------------------
+st.markdown("## Enter Four Feature Values")
+
+with st.form("prediction_form"):
     cols = st.columns(2)
     user_inputs = {}
 
-    for i, inp in enumerate(MODEL_INFO["inputs"]):
+    for i, feature in enumerate(FEATURE_CONFIG):
         with cols[i % 2]:
-            user_inputs[inp['name']] = st.number_input(
-                inp['name'].replace('_', ' ').upper(),
-                min_value=inp['min'],
-                value=inp['default'],
-                step=inp['step']
+            user_inputs[feature["name"]] = st.number_input(
+                label=feature["label"],
+                min_value=float(feature["min"]),
+                max_value=float(feature["max"]),
+                value=float(feature["default"]),
+                step=float(feature["step"]),
+                help=feature["help"],
             )
 
     submitted = st.form_submit_button("Run Prediction")
 
+# ---------------------------
+# RUN RESULT
+# ---------------------------
 if submitted:
+    st.markdown("## Prediction Result")
+    result, status = call_model_api(user_inputs)
 
-    data_row = [user_inputs[k] for k in MODEL_INFO["keys"]]
-
-    # Prepare data
-    base_df = df_features
-    input_df = pd.concat([base_df, pd.DataFrame([data_row], columns=base_df.columns)])
-
-    res, status = call_model_api(input_df)
     if status == 200:
-        st.metric("Prediction Result", res)
-        display_explanation(input_df, session, aws_bucket)
+        st.success("Prediction completed successfully.")
+        st.metric("Predicted Future Return", round(result, 4))
+        display_explanation(user_inputs)
     else:
-        st.error(res)
+        st.error(result)
